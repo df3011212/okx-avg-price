@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>OKX 開倉均價計算器</title>
+  <style>
+    body {
+      background: #111;
+      color: #fff;
+      font-family: "Microsoft JhengHei", sans-serif;
+      padding: 20px;
+    }
+    h2 {
+      font-size: 22px;
+    }
+    label, input, select, button {
+      display: block;
+      margin-bottom: 10px;
+      font-size: 16px;
+    }
+    input, select {
+      padding: 10px;
+      width: 100%;
+      background: #222;
+      color: #fff;
+      border: 1px solid #444;
+    }
+    button {
+      background: #00aaff;
+      color: white;
+      border: none;
+      padding: 10px;
+      cursor: pointer;
+      border-radius: 4px;
+    }
+    .row {
+      display: flex;
+      gap: 10px;
+    }
+    .result {
+      font-size: 18px;
+      font-weight: bold;
+      margin-top: 20px;
+    }
+  </style>
+</head>
+<body>
+  <h2>OKX 開倉均價計算器</h2>
+
+  <label for="symbol">搜尋幣種（例如 XRP-USDT）</label>
+  <input list="symbols" id="symbol" placeholder="輸入幣種..." onchange="onSymbolChange()">
+  <datalist id="symbols"></datalist>
+
+  <label for="interval">更新頻率（秒）：</label>
+  <select id="interval" onchange="updateInterval()">
+    <option value="1000" selected>1 秒</option>
+    <option value="2000">2 秒</option>
+    <option value="3000">3 秒</option>
+    <option value="4000">4 秒</option>
+    <option value="5000">5 秒</option>
+  </select>
+
+  <label for="mode">計算模式：</label>
+  <select id="mode" onchange="onModeChange()">
+    <option value="qty">張數模式（對齊 OKX）</option>
+    <option value="usdt">USDT 模式（估算張數）</option>
+  </select>
+
+  <label for="decimalSelect">顯示小數位數：</label>
+  <select id="decimalSelect" onchange="onDecimalChange()">
+    <option value="2">2 位</option>
+    <option value="3">3 位</option>
+    <option value="4" selected>4 位</option>
+    <option value="5">5 位</option>
+    <option value="6">6 位</option>
+    <option value="7">7 位</option>
+    <option value="8">8 位</option>
+  </select>
+
+  <div id="priceInfo"></div>
+
+  <div id="entries"></div>
+  <button onclick="addEntry()">➕ 新增一筆交易</button>
+  <button onclick="calculateAvg()">📊 計算平均開倉價</button>
+
+  <div class="result" id="result">平均開倉價：--</div>
+
+  <script>
+    let decimals = 4;
+    let displayDecimals = 4;
+    let currentSymbol = "";
+    let priceTimer = null;
+    let currentMode = "qty"; // 預設張數模式
+
+    async function loadSymbols() {
+      const res = await fetch("https://www.okx.com/api/v5/public/instruments?instType=SWAP");
+      const data = await res.json();
+      const list = document.getElementById("symbols");
+      data.data.forEach(inst => {
+        const opt = document.createElement("option");
+        opt.value = inst.instId;
+        list.appendChild(opt);
+      });
+    }
+
+    async function loadTicker(symbol) {
+      if (!symbol) return;
+      try {
+        const res = await fetch(`https://www.okx.com/api/v5/market/ticker?instId=${symbol}`);
+        const data = await res.json();
+        const price = data.data[0].last;
+
+        const infoRes = await fetch("https://www.okx.com/api/v5/public/instruments?instType=SWAP");
+        const infoData = await infoRes.json();
+        const inst = infoData.data.find(i => i.instId === symbol);
+        decimals = inst ? (inst.tickSz.split(".")[1]?.length || 2) : 4;
+        displayDecimals = decimals;
+        document.getElementById("decimalSelect").value = String(decimals);
+
+        document.getElementById("priceInfo").innerText = `現價：${price}，系統小數位：${decimals}`;
+        calculateAvg();
+      } catch (e) {
+        document.getElementById("priceInfo").innerText = "⚠ 無法取得價格資訊";
+      }
+    }
+
+    function onSymbolChange() {
+      currentSymbol = document.getElementById("symbol").value;
+      loadTicker(currentSymbol);
+    }
+
+    function onDecimalChange() {
+      displayDecimals = parseInt(document.getElementById("decimalSelect").value);
+      calculateAvg();
+    }
+
+    function onModeChange() {
+      currentMode = document.getElementById("mode").value;
+      document.getElementById("entries").innerHTML = ""; // 清空欄位
+      addEntry();
+    }
+
+    function addEntry() {
+      const div = document.createElement("div");
+      div.className = "row";
+      if (currentMode === "qty") {
+        div.innerHTML = `
+          <input type="number" step="0.0000001" placeholder="開倉價格 (USDT)" class="price" />
+          <input type="number" step="0.0000001" placeholder="張數 / 幣數" class="qty" />
+        `;
+      } else {
+        div.innerHTML = `
+          <input type="number" step="0.0000001" placeholder="開倉價格 (USDT)" class="price" />
+          <input type="number" step="0.0001" placeholder="投入 USDT" class="usdt" />
+        `;
+      }
+      document.getElementById("entries").appendChild(div);
+    }
+
+    function calculateAvg() {
+      const prices = document.querySelectorAll(".price");
+
+      if (currentMode === "qty") {
+        const qtys = document.querySelectorAll(".qty");
+        let totalQty = 0;
+        let totalValue = 0;
+
+        for (let i = 0; i < prices.length; i++) {
+          const price = parseFloat(prices[i].value);
+          const qty = parseFloat(qtys[i].value);
+          if (!isNaN(price) && !isNaN(qty) && price > 0 && qty > 0) {
+            totalQty += qty;
+            totalValue += price * qty;
+          }
+        }
+
+        const avgPrice = totalQty > 0 ? totalValue / totalQty : 0;
+        document.getElementById("result").innerText = `平均開倉價：${avgPrice.toFixed(displayDecimals)} USDT`;
+      } else {
+        const usdts = document.querySelectorAll(".usdt");
+        let totalUsdt = 0;
+        let totalQty = 0;
+
+        for (let i = 0; i < prices.length; i++) {
+          const price = parseFloat(prices[i].value);
+          const usdt = parseFloat(usdts[i].value);
+          if (!isNaN(price) && !isNaN(usdt) && price > 0 && usdt > 0) {
+            const qty = usdt / price;
+            totalUsdt += usdt;
+            totalQty += qty;
+          }
+        }
+
+        const avgPrice = totalQty > 0 ? totalUsdt / totalQty : 0;
+        document.getElementById("result").innerText = `平均開倉價：${avgPrice.toFixed(displayDecimals)} USDT`;
+      }
+    }
+
+    function updateInterval() {
+      const intervalMs = parseInt(document.getElementById("interval").value);
+      if (priceTimer) clearInterval(priceTimer);
+      priceTimer = setInterval(() => {
+        if (currentSymbol) {
+          loadTicker(currentSymbol);
+        }
+      }, intervalMs);
+    }
+
+    loadSymbols();
+    addEntry();
+    updateInterval();
+  </script>
+</body>
+</html>
